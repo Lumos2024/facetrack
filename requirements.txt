@@ -1,0 +1,3 @@
+# 从仓库根目录运行：python -m pip install -r requirements.txt
+-e .
+

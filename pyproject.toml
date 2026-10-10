@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neck-face-tracker"
+version = "0.1.0"
+description = "One- or two-camera YOLOv8 face tracking with optional ROS 2 neck control"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+classifiers = [
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3.10",
+]
+dependencies = [
+  "dill>=0.3.6",
+  "numpy>=1.24,<3",
+  "omegaconf>=2.3",
+  "opencv-python>=4.9",
+  "psutil>=5.9",
+  "PyYAML>=5.3.1",
+  "ultralytics>=8.3,<9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+facetrack = "neck_face_tracker.tracker:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+neck_face_tracker = ["models/*.pt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
