@@ -435,8 +435,27 @@ def _draw_frame(frame: CameraFrame, observations: Sequence[FaceObservation], sel
     import cv2
 
     image = frame.image.copy()
+    cv2.putText(
+        image,
+        f"CAMERA {frame.camera_id}",
+        (10, 28),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.72,
+        (255, 255, 255),
+        2,
+    )
     observation = next((item for item in observations if item.camera_id == frame.camera_id), None)
-    if observation is not None:
+    if frame.sequence == 0:
+        cv2.putText(
+            image,
+            "Waiting for frame...",
+            (10, 58),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 255, 255),
+            2,
+        )
+    elif observation is not None:
         x1, y1, x2, y2 = (int(value) for value in observation.bbox)
         color = (0, 0, 255) if selected is not None and selected.camera_id == frame.camera_id else (0, 255, 0)
         cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
@@ -445,14 +464,14 @@ def _draw_frame(frame: CameraFrame, observations: Sequence[FaceObservation], sel
         cv2.putText(
             image,
             f"dx={observation.normalized_dx:+.3f} area={observation.normalized_area:.3f}",
-            (10, 28),
+            (10, 58),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.65,
             color,
             2,
         )
     else:
-        cv2.putText(image, "No face", (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2)
+        cv2.putText(image, "No face", (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2)
     return image
 
 
@@ -485,6 +504,34 @@ def _compose_display(
         1,
     )
     return canvas
+
+
+def _update_display_frame_cache(
+    cache: dict[str, CameraFrame],
+    fresh_frames: Sequence[CameraFrame],
+    camera_order: Sequence[str],
+    *,
+    placeholder_size: tuple[int, int] | None = None,
+) -> list[CameraFrame]:
+    """Keep both camera panels visible when their frames arrive asynchronously."""
+    for frame in fresh_frames:
+        cache[frame.camera_id] = frame
+    displayed: list[CameraFrame] = []
+    for camera_id in camera_order:
+        frame = cache.get(camera_id)
+        if frame is None and placeholder_size is not None:
+            import numpy as np
+
+            width, height = placeholder_size
+            frame = CameraFrame(
+                camera_id,
+                np.zeros((max(1, height), max(1, width), 3), dtype=np.uint8),
+                0,
+                0.0,
+            )
+        if frame is not None:
+            displayed.append(frame)
+    return displayed
 
 
 def run(args: argparse.Namespace) -> int:
@@ -543,6 +590,8 @@ def run(args: argparse.Namespace) -> int:
             LOGGER.info("Detection-only mode; pass --control to command Motor 1")
 
         previous_sequences: dict[str, int] = {}
+        display_frame_cache: dict[str, CameraFrame] = {}
+        camera_order = [worker.camera_id for worker in workers]
         selected_camera: str | None = None
         last_live_frame_s = time.monotonic()
         camera_loss_motion_cancelled = False
@@ -646,8 +695,14 @@ def run(args: argparse.Namespace) -> int:
                         if target_selected_active
                         else (f"selected={selected.camera_id}" if selected is not None else "selected=none")
                     )
-                    canvas = _compose_display(
+                    display_frames = _update_display_frame_cache(
+                        display_frame_cache,
                         frames,
+                        camera_order,
+                        placeholder_size=(args.width, args.height),
+                    )
+                    canvas = _compose_display(
+                        display_frames,
                         observations,
                         selected,
                         status_text=f"{selected_text} | {motor_text}",

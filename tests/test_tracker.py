@@ -8,6 +8,7 @@ from neck_face_tracker.tracker import (
     FaceYawController,
     MostBiasedCameraSelector,
     _compose_display,
+    _update_display_frame_cache,
     largest_face,
 )
 from neck_face_tracker.ros_neck import SimulatedRosNeckClient
@@ -127,6 +128,39 @@ class SimpleGuiTests(unittest.TestCase):
 
         canvas = _compose_display(frames, targets, targets[1], status_text="selected=right")
 
+        self.assertEqual(canvas.shape, (480, 1280, 3))
+
+    def test_cached_camera_panel_remains_when_only_other_camera_has_a_fresh_frame(self):
+        image = np.zeros((480, 640, 3), dtype=np.uint8)
+        cache = {}
+        initial = [
+            CameraFrame("left", image, 1, 1.0),
+            CameraFrame("right", image, 1, 1.0),
+        ]
+        _update_display_frame_cache(cache, initial, ["left", "right"])
+
+        displayed = _update_display_frame_cache(
+            cache,
+            [CameraFrame("left", image, 2, 2.0)],
+            ["left", "right"],
+        )
+
+        self.assertEqual([frame.camera_id for frame in displayed], ["left", "right"])
+        self.assertEqual([frame.sequence for frame in displayed], [2, 1])
+
+    def test_missing_camera_gets_a_fixed_size_placeholder_panel(self):
+        image = np.zeros((480, 640, 3), dtype=np.uint8)
+        displayed = _update_display_frame_cache(
+            {},
+            [CameraFrame("left", image, 1, 1.0)],
+            ["left", "right"],
+            placeholder_size=(640, 480),
+        )
+
+        self.assertEqual([frame.camera_id for frame in displayed], ["left", "right"])
+        self.assertEqual(displayed[1].sequence, 0)
+        self.assertEqual(displayed[1].image.shape, (480, 640, 3))
+        canvas = _compose_display(displayed, [], None, status_text="waiting")
         self.assertEqual(canvas.shape, (480, 1280, 3))
 
 
