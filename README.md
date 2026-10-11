@@ -11,9 +11,10 @@
 - 双摄像头一次批量推理；各画面先选最大人脸，再选水平偏差最大的摄像头。
 - 切换摄像头需要连续确认并设置保持时间，减少左右跳动。
 - 默认仅检测，不发电机命令。
-- `--control` 才启用 Motor 1 控制，并发布 `/neck_control_owner` 所有权租约。
+- `--control` 才启用 Motor 1 控制。
+- 控制模式持续订阅 `/target_selected`。收到 `true` 后暂停人脸角度控制，只向电机话题发送一次固定位置（默认 `0.0 rad`）；收到 `false` 后恢复跟踪。
 - Motor 2、Motor 3 的位置字段始终为 `NaN`，本模块不会控制它们。
-- 所有摄像头画面失效超过 1 秒时，释放颈部控制权。
+- 所有摄像头画面失效超过 1 秒时，取消正在运行的人脸跟踪轨迹。
 
 ## 运行环境
 
@@ -43,8 +44,11 @@ facetrack --cameras 0 --display
 双摄像头 + 模拟电机：
 
 ```bash
+source /opt/ros/humble/setup.bash
 facetrack --cameras 0 1 --display --control --simulate-motor
 ```
+
+模拟电机模式不会发布真实 `/neck_positions_batch`，但会订阅真正的 `/target_selected`，因此可用摄像头完整测试控制切换而不连接电机。
 
 真实 ROS 2 Motor 1（先阅读安全说明）：
 
@@ -54,13 +58,21 @@ source .venv/bin/activate
 facetrack --cameras 0 1 --display --control
 ```
 
+修改 `target_selected=true` 时发送的一次性位置：
+
+```bash
+facetrack --cameras 0 1 --display --control --selected-rad 0.35
+```
+
+也可以用 `--target-selected-topic /其他话题` 修改 Bool 话题名称。保持 `true` 期间不会继续发布 `/neck_positions_batch`；`false` 后恢复人脸跟踪。
+
 退出窗口按 `Q` 或 `Esc`。如果电机转向相反，增加 `--yaw-sign -1`。
 
 ## 文档
 
 - [需求与设计](docs/REQUIREMENTS_CN.md)
 - [Ubuntu + ROS 2 安装](docs/INSTALL_UBUNTU_ROS2_CN.md)
-- [ROS 接口与所有权规则](docs/ROS_INTERFACE_CN.md)
+- [ROS 接口与切换规则](docs/ROS_INTERFACE_CN.md)
 - [第三方组件说明](THIRD_PARTY_NOTICES.md)
 
 ## 当前验证范围

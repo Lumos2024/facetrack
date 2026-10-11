@@ -1,4 +1,4 @@
-# ROS 2 接口与所有权规则
+# ROS 2 接口与切换规则
 
 ## 电机接口
 
@@ -6,31 +6,27 @@
 |---|---|---|---|
 | 发布 | `/neck_positions_batch` | `std_msgs/Float32MultiArray` | 12-float v4 电机命令 |
 | 订阅 | `/neck_states` | `std_msgs/Float32MultiArray` | Motor 1 状态反馈 |
-| 发布/订阅 | `/neck_control_owner` | `std_msgs/String` | JSON 所有权短租约 |
+| 订阅 | `/target_selected` | `std_msgs/Bool` | 暂停/恢复人脸角度跟踪 |
 
 Motor 1 命令使用数组中的第 1 个电机槽位。Motor 2、Motor 3 的目标位置填 `NaN`，速度和增益参数填 0。
 
-## owner 消息
+## target_selected 行为
 
-示例：
+- `false`：根据人脸水平误差正常控制 Motor 1。
+- 从 `false` 变成 `true`：取消正在运行的人脸轨迹，发送一次 `--selected-rad` 指定的位置，默认 `0.0 rad`。
+- 保持 `true`：继续监听状态，但不再发布 `/neck_positions_batch`。
+- 从 `true` 变回 `false`：恢复人脸跟踪。
 
-```json
-{"active":true,"lease_ms":500,"owner_id":"yolov8_face_tracker","priority":50,"sent_at_s":1760000000.0}
+测试命令：
+
+```bash
+ros2 topic pub --once /target_selected std_msgs/msg/Bool '{data: true}'
+ros2 topic pub --once /target_selected std_msgs/msg/Bool '{data: false}'
 ```
-
-字段含义：
-
-- `owner_id`：控制节点的唯一名称。
-- `active`：`true` 表示取得控制，`false` 表示主动释放。
-- `lease_ms`：租约有效期，默认 500 ms。
-- `sent_at_s`：发送端 Unix 时间，仅用于日志；接收端用本地单调时钟判断过期。
-- `priority`：保留的协调优先级字段。当前版本遇到其他有效 owner 时直接让出，不做抢占。
-
-控制节点约每 100 ms 续租。其他颈部控制节点如果采用此协议，应在看到另一个未过期的 owner 后立即停止发布 `/neck_positions_batch`。
 
 ## 安全边界
 
-owner 是协作信号，无法阻止不遵守协议的节点发布。因此本模块还会检查 `/neck_positions_batch` 的其他 publisher；默认检测到其他 publisher 就拒绝动作。只有确认全部节点都正确服从 owner 协议后，才允许传入 `--allow-coordinated-publishers`。
+`/target_selected` 是当前唯一的控制切换信号，不再使用 `/neck_control_owner`。负责发布 `/target_selected` 的节点必须保证：值为 `false` 时其他控制节点不发送颈部命令；值变成 `true` 后，先让 facetrack 发完一次固定 rad，再由其他节点接管，避免多个节点同时发布互相冲突的命令。
 
 真实安全仍应由电机桥、机械限位、急停和现场操作流程保证。
 

@@ -62,7 +62,13 @@ class RosNeckClient:
     and 3 are always NaN, so this project cannot change either motor.
     """
 
-    def __init__(self, *, auto_start: bool = True, allow_coordinated_publishers: bool = False):
+    def __init__(
+        self,
+        *,
+        auto_start: bool = True,
+        target_selected_topic: str = "/target_selected",
+        motor_io: bool = True,
+    ):
         self._lock = threading.RLock()
         self._available = False
         self._message = "ROS 2 not started"
@@ -81,7 +87,9 @@ class RosNeckClient:
         self._other_publishers_cache: tuple[str, ...] = ()
         self._other_publishers_checked_s = 0.0
         self._commanded_enable = False
-        self._allow_coordinated_publishers = bool(allow_coordinated_publishers)
+        self._target_selected_topic = str(target_selected_topic).strip() or "/target_selected"
+        self._target_selected = False
+        self._motor_io = bool(motor_io)
         if auto_start:
             self.start()
 
@@ -93,13 +101,19 @@ class RosNeckClient:
             import rclpy
             from rclpy.context import Context
             from rclpy.executors import SingleThreadedExecutor
-            from std_msgs.msg import Float32MultiArray
+            from std_msgs.msg import Bool, Float32MultiArray
 
             context = Context()
             rclpy.init(context=context)
-            node = rclpy.create_node("positioning_neck_yaw", context=context)
-            publisher = node.create_publisher(Float32MultiArray, "neck_positions_batch", 10)
-            node.create_subscription(Float32MultiArray, "neck_states", self._state_callback, 10)
+            node_name = "positioning_neck_yaw" if self._motor_io else "facetrack_simulated_neck"
+            node = rclpy.create_node(node_name, context=context)
+            publisher = None
+            message_type = None
+            if self._motor_io:
+                publisher = node.create_publisher(Float32MultiArray, "neck_positions_batch", 10)
+                node.create_subscription(Float32MultiArray, "neck_states", self._state_callback, 10)
+                message_type = Float32MultiArray
+            node.create_subscription(Bool, self._target_selected_topic, self._target_selected_callback, 10)
             executor = SingleThreadedExecutor(context=context)
             executor.add_node(node)
         except Exception as exc:
@@ -111,15 +125,27 @@ class RosNeckClient:
             self._context = context
             self._node = node
             self._publisher = publisher
-            self._message_type = Float32MultiArray
+            self._message_type = message_type
             self._executor = executor
             self._available = True
-            self._message = "waiting for /neck_states"
+            self._message = "waiting for /neck_states" if self._motor_io else "simulated target listener ready"
         self._spin_thread = threading.Thread(target=executor.spin, name="neck-ros-spin", daemon=True)
         self._spin_thread.start()
 
     def _state_callback(self, message: Any) -> None:
         self.update_state(list(message.data))
+
+    def _target_selected_callback(self, message: Any) -> None:
+        with self._lock:
+            self._target_selected = bool(message.data)
+
+    def target_selected(self) -> bool:
+        with self._lock:
+            return self._target_selected
+
+    def target_selected_listener_available(self) -> bool:
+        with self._lock:
+            return self._node is not None
 
     def update_state(self, values: list[float]) -> None:
         if len(values) < STATE_FIELDS:
@@ -198,14 +224,6 @@ class RosNeckClient:
         except Exception:
             return cached
 
-    def _require_exclusive_control(self) -> None:
-        if self._allow_coordinated_publishers:
-            return
-        publishers = self._other_command_publishers(force=True)
-        if publishers:
-            joined = ", ".join(publishers)
-            raise RuntimeError(f"Close the other neck command publisher first: {joined}")
-
     def status_dict(self) -> dict[str, Any]:
         result = asdict(self.status())
         for key in ("position_rad", "position_deg", "velocity_rad_s", "torque_nm", "feedback_age_s"):
@@ -233,7 +251,6 @@ class RosNeckClient:
         publisher.publish(message)
 
     def enable_motor1(self) -> NeckYawStatus:
-        self._require_exclusive_control()
         status = self.status()
         if not status.connected:
             raise RuntimeError("Motor 1 has no valid /neck_states feedback")
@@ -246,7 +263,7 @@ class RosNeckClient:
         return self.status()
 
     def disable_motor1(self) -> NeckYawStatus:
-        self._cancel_trajectory()
+        self._cancel_trajectory(wait=True)
         self._publish(neck_command_payload(CMD_DISABLE))
         with self._lock:
             self._commanded_enable = False
@@ -254,8 +271,7 @@ class RosNeckClient:
         return self.status()
 
     def hold_motor1(self) -> NeckYawStatus:
-        self._require_exclusive_control()
-        self._cancel_trajectory()
+        self._cancel_trajectory(wait=True)
         status = self.status()
         if not status.connected or not status.enabled or status.position_rad is None:
             raise RuntimeError("Motor 1 must have valid feedback and be enabled")
@@ -266,8 +282,7 @@ class RosNeckClient:
         return self.status()
 
     def set_zero_motor1(self) -> NeckYawStatus:
-        self._require_exclusive_control()
-        self._cancel_trajectory()
+        self._cancel_trajectory(wait=True)
         status = self.status()
         if not status.connected:
             raise RuntimeError("Motor 1 has no valid /neck_states feedback")
@@ -277,7 +292,6 @@ class RosNeckClient:
         return self.status()
 
     def move_motor1(self, target_deg: float, duration_s: float) -> dict[str, Any]:
-        self._require_exclusive_control()
         status = self.status()
         if not status.connected or status.position_rad is None:
             raise RuntimeError("Motor 1 has no valid /neck_states feedback")
@@ -304,6 +318,36 @@ class RosNeckClient:
         delta = max(-10.0, min(10.0, float(delta_deg)))
         goal_deg = max(-YAW_LIMIT_DEG, min(YAW_LIMIT_DEG, math.degrees(status.position_rad) + delta))
         return self.move_motor1(goal_deg, duration_s)
+
+    def cancel_motor1_motion(self) -> None:
+        """Cancel a running face-tracking trajectory without publishing."""
+
+        self._cancel_trajectory(wait=True)
+
+    def send_motor1_position_once(self, target_rad: float) -> dict[str, Any]:
+        """Publish one Motor 1 position command, then leave the topic silent."""
+
+        self._cancel_trajectory(wait=True)
+        status = self.status()
+        if not status.connected or status.position_rad is None:
+            raise RuntimeError("Motor 1 has no valid /neck_states feedback")
+        if not status.enabled:
+            raise RuntimeError("Enable Motor 1 before sending a selected target")
+        if status.error_code not in (0, 1):
+            raise RuntimeError(f"Motor 1 error code is {status.error_code}")
+        if not math.isfinite(float(target_rad)):
+            raise ValueError("Selected target rad must be finite")
+        limit_rad = math.radians(YAW_LIMIT_DEG)
+        goal_rad = max(-limit_rad, min(limit_rad, float(target_rad)))
+        self._publish(neck_motion_payload(goal_rad, 0.0, 0.0))
+        with self._lock:
+            self._gain_blend = 0.0
+            self._message = "Motor 1 selected target sent once"
+        return {
+            "start_rad": round(status.position_rad, 6),
+            "goal_rad": round(goal_rad, 6),
+            "goal_deg": round(math.degrees(goal_rad), 3),
+        }
 
     @staticmethod
     def _quintic(progress: float) -> tuple[float, float, float]:
@@ -380,14 +424,17 @@ class RosNeckClient:
         self._trajectory_thread = threading.Thread(target=run, name="neck-yaw-trajectory", daemon=True)
         self._trajectory_thread.start()
 
-    def _cancel_trajectory(self) -> None:
+    def _cancel_trajectory(self, *, wait: bool = False) -> None:
         with self._lock:
             self._trajectory_generation += 1
             self._moving = False
             self._gain_blend = 0.0
+            thread = self._trajectory_thread
+        if wait and thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=0.2)
 
     def close(self) -> None:
-        self._cancel_trajectory()
+        self._cancel_trajectory(wait=True)
         with self._lock:
             should_disable = self._commanded_enable and self._publisher is not None
         if should_disable:
@@ -400,6 +447,7 @@ class RosNeckClient:
             executor = self._executor
             node = self._node
             context = self._context
+            spin_thread = self._spin_thread
             self._available = False
             self._commanded_enable = False
         try:
@@ -407,6 +455,8 @@ class RosNeckClient:
                 executor.shutdown(timeout_sec=0.5)
         except Exception:
             pass
+        if spin_thread is not None and spin_thread is not threading.current_thread():
+            spin_thread.join(timeout=1.0)
         try:
             if node is not None:
                 node.destroy_node()
@@ -420,8 +470,17 @@ class RosNeckClient:
 
 
 class SimulatedRosNeckClient(RosNeckClient):
-    def __init__(self):
-        super().__init__(auto_start=False)
+    def __init__(
+        self,
+        *,
+        target_selected_topic: str = "/target_selected",
+        listen_to_ros: bool = False,
+    ):
+        super().__init__(
+            auto_start=listen_to_ros,
+            target_selected_topic=target_selected_topic,
+            motor_io=False,
+        )
         self._available = True
         self._message = "simulated Motor 1 feedback"
         self.update_state([0.0, 0.0, 0.0, 25.0, 25.0, 0.0, 0.0, 1.0])
@@ -446,4 +505,4 @@ class SimulatedRosNeckClient(RosNeckClient):
         self.update_state(state)
 
     def close(self) -> None:
-        self._cancel_trajectory()
+        super().close()

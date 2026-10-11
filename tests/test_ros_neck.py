@@ -92,21 +92,51 @@ class RosNeckProtocolTests(unittest.TestCase):
 
         self.assertTrue(client.status().enabled)
 
-    def test_other_gui_publisher_blocks_motion_commands(self):
+    def test_target_selected_bool_is_continuously_stored(self):
+        class Message:
+            data = True
+
+        client = RosNeckClient(auto_start=False)
+        client._target_selected_callback(Message())
+        self.assertTrue(client.target_selected())
+
+        Message.data = False
+        client._target_selected_callback(Message())
+        self.assertFalse(client.target_selected())
+
+    def test_selected_rad_is_published_exactly_once(self):
         client = SimulatedRosNeckClient()
-        client._other_command_publishers = lambda force=False: ("/neck_mit_controller",)
+        client.enable_motor1()
+        published = []
+        original_publish = client._publish
 
-        with self.assertRaisesRegex(RuntimeError, "neck_mit_controller"):
-            client.enable_motor1()
+        def record_publish(values):
+            published.append(list(values))
+            original_publish(values)
 
-    def test_owner_coordinated_mode_allows_idle_peer_publishers(self):
-        client = RosNeckClient(auto_start=False, allow_coordinated_publishers=True)
-        client._available = True
-        client._publisher = object()
-        client._message_type = object()
-        client._other_command_publishers = lambda force=False: ("/neck_mit_controller",)
+        client._publish = record_publish
+        client.move_motor1(10.0, 0.5)
+        time.sleep(0.03)
+        published.clear()
+        command = client.send_motor1_position_once(0.25)
+        count_after_selected_command = len(published)
+        time.sleep(0.05)
 
-        client._require_exclusive_control()
+        self.assertEqual(count_after_selected_command, 1)
+        self.assertEqual(len(published), 1)
+        self.assertAlmostEqual(published[0][0], 0.25)
+        self.assertEqual(command["goal_rad"], 0.25)
+        self.assertFalse(client.status().moving)
+        client.disable_motor1()
+
+    def test_selected_rad_rejects_non_finite_value(self):
+        client = SimulatedRosNeckClient()
+        client.enable_motor1()
+
+        with self.assertRaisesRegex(ValueError, "finite"):
+            client.send_motor1_position_once(math.nan)
+
+        client.disable_motor1()
 
     def test_feedback_timeout_marks_connection_stale(self):
         client = RosNeckClient(auto_start=False)

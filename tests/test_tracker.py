@@ -1,4 +1,3 @@
-import time
 import unittest
 
 import numpy as np
@@ -115,20 +114,6 @@ class FaceYawControllerTests(unittest.TestCase):
         self.assertIsNotNone(motion)
         self.assertEqual(motion["goal_deg"], 5.0)
         neck.disable_motor1()
-
-    def test_owner_must_still_own_control(self):
-        class LostOwner:
-            @staticmethod
-            def owns_control():
-                return False
-
-        neck = SimulatedRosNeckClient()
-        neck.enable_motor1()
-        controller = FaceYawController(neck, owner=LostOwner(), deadband=0.1)
-
-        self.assertIsNone(controller.update(observation("left", 0.8), now_s=time.monotonic()))
-        neck.disable_motor1()
-
 
 class SimpleGuiTests(unittest.TestCase):
     def test_two_camera_frames_are_composed_in_one_window_image(self):

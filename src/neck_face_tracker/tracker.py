@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-from .neck_owner import RosNeckOwnerLease
 from .ros_neck import RosNeckClient, SimulatedRosNeckClient
 
 
@@ -346,7 +345,6 @@ class FaceYawController:
         self,
         neck: RosNeckClient,
         *,
-        owner: RosNeckOwnerLease | None = None,
         deadband: float = 0.10,
         horizontal_fov_deg: float = 70.0,
         gain: float = 0.65,
@@ -358,7 +356,6 @@ class FaceYawController:
         speed_deg_s: float = 25.0,
     ):
         self.neck = neck
-        self.owner = owner
         self.deadband = max(0.0, min(0.5, float(deadband)))
         self.horizontal_fov_deg = max(10.0, min(180.0, float(horizontal_fov_deg)))
         self.gain = max(0.05, min(2.0, float(gain)))
@@ -375,8 +372,6 @@ class FaceYawController:
         if abs(target.normalized_dx) <= self.deadband:
             return None
         if now - self._last_command_s < self.min_command_interval_s:
-            return None
-        if self.owner is not None and not self.owner.owns_control():
             return None
         status = self.neck.status()
         if not status.connected or not status.enabled or status.position_deg is None or status.moving:
@@ -420,12 +415,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--yaw-max-deg", type=float, default=45.0)
     parser.add_argument("--control", action="store_true", help="Actually command ROS Motor 1")
     parser.add_argument("--simulate-motor", action="store_true", help="Use the in-process simulated Motor 1")
-    parser.add_argument("--owner-id", default="yolov8_face_tracker")
-    parser.add_argument("--owner-topic", default="/neck_control_owner")
     parser.add_argument(
-        "--allow-coordinated-publishers",
-        action="store_true",
-        help="Allow other neck command publishers only when every peer obeys the owner topic",
+        "--target-selected-topic",
+        default="/target_selected",
+        help="std_msgs/Bool topic that pauses face tracking and triggers one fixed-rad command",
+    )
+    parser.add_argument(
+        "--selected-rad",
+        type=float,
+        default=0.0,
+        help="Motor 1 position sent once when target_selected becomes true",
     )
     parser.add_argument("--display", action="store_true", help="Show camera windows; requires non-headless OpenCV")
     parser.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
@@ -493,7 +492,6 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("This tracker supports at most two cameras")
     workers: list[CameraWorker] = []
     neck: RosNeckClient | None = None
-    owner: RosNeckOwnerLease | None = None
     try:
         for index, value in enumerate(args.cameras):
             source = _parse_camera_source(value)
@@ -519,19 +517,20 @@ def run(args: argparse.Namespace) -> int:
         motor_enable_requested = False
         if args.control:
             if args.simulate_motor:
-                neck = SimulatedRosNeckClient()
-                neck.enable_motor1()
-            else:
-                owner = RosNeckOwnerLease(owner_id=args.owner_id, topic=args.owner_topic)
-                if not owner.claim():
-                    LOGGER.error("Neck is owned by %s", owner.other_owner() or "another node")
-                    return 3
-                neck = RosNeckClient(
-                    allow_coordinated_publishers=args.allow_coordinated_publishers,
+                neck = SimulatedRosNeckClient(
+                    target_selected_topic=args.target_selected_topic,
+                    listen_to_ros=True,
                 )
+                neck.enable_motor1()
+                if not neck.target_selected_listener_available():
+                    LOGGER.warning(
+                        "ROS 2 target listener unavailable; source ROS 2 before testing %s",
+                        args.target_selected_topic,
+                    )
+            else:
+                neck = RosNeckClient(target_selected_topic=args.target_selected_topic)
             controller = FaceYawController(
                 neck,
-                owner=owner,
                 deadband=args.deadband,
                 horizontal_fov_deg=args.horizontal_fov,
                 yaw_sign=args.yaw_sign,
@@ -546,37 +545,26 @@ def run(args: argparse.Namespace) -> int:
         previous_sequences: dict[str, int] = {}
         selected_camera: str | None = None
         last_live_frame_s = time.monotonic()
-        owner_released_for_camera_loss = False
-        next_owner_reclaim_s = 0.0
+        camera_loss_motion_cancelled = False
+        target_selected_was_active = False
+        selected_rad_sent = False
         while True:
             frames = [frame for worker in workers if (frame := worker.snapshot()) is not None]
-            if not frames:
-                now_s = time.monotonic()
-                if (
-                    owner is not None
-                    and owner.owns_control()
-                    and now_s - last_live_frame_s >= 1.0
-                ):
-                    owner.release()
-                    owner_released_for_camera_loss = True
-                    next_owner_reclaim_s = now_s + 1.0
-                    LOGGER.warning("All camera streams are stale; neck owner released")
-                time.sleep(0.02)
-                continue
-            last_live_frame_s = time.monotonic()
-            if owner is not None and owner_released_for_camera_loss and last_live_frame_s >= next_owner_reclaim_s:
-                if owner.claim():
-                    owner_released_for_camera_loss = False
-                    LOGGER.info("Camera stream recovered; neck owner reacquired")
+            now_s = time.monotonic()
+            target_selected_active = bool(neck is not None and neck.target_selected())
+            if target_selected_active != target_selected_was_active:
+                if target_selected_active:
+                    neck.cancel_motor1_motion()
+                    LOGGER.info(
+                        "%s=true: face-angle control paused; waiting to send %.6f rad once",
+                        args.target_selected_topic,
+                        args.selected_rad,
+                    )
                 else:
-                    next_owner_reclaim_s = last_live_frame_s + 1.0
-            sequences = {frame.camera_id: frame.sequence for frame in frames}
-            if sequences == previous_sequences:
-                time.sleep(0.005)
-                continue
-            previous_sequences = sequences
-            observations = detector.detect(frames)
-            selected = selector.select(observations)
+                    selected_rad_sent = False
+                    LOGGER.info("%s=false: face tracking resumed", args.target_selected_topic)
+                target_selected_was_active = target_selected_active
+
             if neck is not None and not args.simulate_motor and not motor_enable_requested:
                 motor_status = neck.status()
                 if motor_status.connected:
@@ -586,6 +574,39 @@ def run(args: argparse.Namespace) -> int:
                         neck.enable_motor1()
                         LOGGER.info("Motor 1 enable command sent after valid feedback")
                     motor_enable_requested = True
+
+            if target_selected_active and neck is not None and not selected_rad_sent:
+                motor_status = neck.status()
+                if motor_status.connected and motor_status.enabled:
+                    command = neck.send_motor1_position_once(args.selected_rad)
+                    selected_rad_sent = True
+                    LOGGER.info(
+                        "%s=true: sent Motor 1 target %.6f rad (%.3f deg) once; motor topic now silent",
+                        args.target_selected_topic,
+                        command["goal_rad"],
+                        command["goal_deg"],
+                    )
+            if not frames:
+                if (
+                    neck is not None
+                    and not target_selected_active
+                    and not camera_loss_motion_cancelled
+                    and now_s - last_live_frame_s >= 1.0
+                ):
+                    neck.cancel_motor1_motion()
+                    camera_loss_motion_cancelled = True
+                    LOGGER.warning("All camera streams are stale; face-tracking motion cancelled")
+                time.sleep(0.02)
+                continue
+            last_live_frame_s = time.monotonic()
+            camera_loss_motion_cancelled = False
+            sequences = {frame.camera_id: frame.sequence for frame in frames}
+            if sequences == previous_sequences:
+                time.sleep(0.005)
+                continue
+            previous_sequences = sequences
+            observations = [] if target_selected_active else detector.detect(frames)
+            selected = None if target_selected_active else selector.select(observations)
             if selected is None:
                 LOGGER.debug("No face in active camera frames")
             else:
@@ -597,7 +618,7 @@ def run(args: argparse.Namespace) -> int:
                         selected.normalized_dx,
                         selected.normalized_area,
                     )
-                if controller is not None:
+                if controller is not None and not target_selected_active:
                     motion = controller.update(selected)
                     if motion is not None:
                         LOGGER.info(
@@ -620,7 +641,11 @@ def run(args: argparse.Namespace) -> int:
                         )
                     else:
                         motor_text = "detection-only"
-                    selected_text = f"selected={selected.camera_id}" if selected is not None else "selected=none"
+                    selected_text = (
+                        "target_selected=true"
+                        if target_selected_active
+                        else (f"selected={selected.camera_id}" if selected is not None else "selected=none")
+                    )
                     canvas = _compose_display(
                         frames,
                         observations,
@@ -639,8 +664,6 @@ def run(args: argparse.Namespace) -> int:
             worker.close()
         if neck is not None:
             neck.close()
-        if owner is not None:
-            owner.close()
         if args.display:
             try:
                 import cv2

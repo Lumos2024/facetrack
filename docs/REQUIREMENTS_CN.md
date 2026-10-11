@@ -15,8 +15,8 @@
 7. GUI 只使用 OpenCV，显示画面、框、水平误差、选中的摄像头和电机状态。
 8. 默认检测模式绝不发布电机命令。真实控制必须显式传入 `--control`。
 9. 真实控制只操作 Motor 1，并限制软件跟踪范围，默认 `-45°` 到 `+45°`。
-10. 通过 `/neck_control_owner` 发布短租约，通知遵守相同协议的节点暂停颈部命令。
-11. 如果发现其他 `/neck_positions_batch` 发布者，默认拒绝控制；只有确认所有节点都遵守 owner 话题时才可使用 `--allow-coordinated-publishers`。
+10. 持续订阅 `/target_selected` (`std_msgs/Bool`)。`true` 的上升沿取消跟踪轨迹，向 `/neck_positions_batch` 发送一次可配置的固定 rad；保持 `true` 时不再发送电机命令，变回 `false` 后恢复人脸跟踪。
+11. 不发布 `/neck_control_owner`；`/target_selected` 是 facetrack 与其他颈部控制节点之间唯一的切换信号。
 
 ## 3. 软件环境
 
@@ -49,7 +49,7 @@
 - 不做人脸身份识别，不判断人物姓名。
 - 不做两个摄像头的画面拼接、深度估计或三维定位。
 - 不提供 Web 页面、数据库或云服务。
-- owner 话题是节点间协调协议，不是硬实时安全互锁。
+- 不负责阻止不遵守 `/target_selected` 切换规则的其他节点同时发送电机命令。
 
 ## 6. 验收建议
 

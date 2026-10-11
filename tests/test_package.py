@@ -19,6 +19,8 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(args.cameras, ["0", "1"])
         self.assertFalse(args.control)
         self.assertEqual(args.model, str(DEFAULT_MODEL))
+        self.assertEqual(args.target_selected_topic, "/target_selected")
+        self.assertEqual(args.selected_rad, 0.0)
 
 
 if __name__ == "__main__":
