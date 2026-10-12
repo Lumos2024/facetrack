@@ -53,6 +53,57 @@ source .venv/bin/activate
 
 安装脚本会创建带 `--system-site-packages` 的虚拟环境，使 ROS 2 Humble 通过 apt 安装的 `rclpy` 和 `std_msgs` 可以被 Python 3.10 使用。脚本最后会自动执行测试。
 
+## 单台强 GPU 电脑（推荐）
+
+一台电脑即可同时连接 W19 摄像头、运行 FaceTrack、ROS 2 和 micro-ROS Agent，不需要第二台电脑。只有一台 W19 也可以工作；程序会自动发现它。
+
+如果电脑使用 NVIDIA 显卡，先确认驱动和显卡可见：
+
+```bash
+nvidia-smi
+```
+
+完成上面的普通安装后，进入虚拟环境：
+
+```bash
+cd facetrack
+source .venv/bin/activate
+```
+
+打开 [PyTorch 官方安装选择器](https://pytorch.org/get-started/locally/)，选择 Linux、Pip、Python，以及与本机驱动兼容的 CUDA 版本，然后在这个虚拟环境中执行网页生成的安装命令。不要直接复制其他电脑的 CUDA 安装命令。
+
+检查 PyTorch 是否真正使用 GPU：
+
+```bash
+python -c "import torch; print('CUDA:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none')"
+```
+
+看到 `CUDA: True` 和显卡名称后，用第一块 NVIDIA GPU 启动：
+
+```bash
+source /opt/ros/humble/setup.bash
+source .venv/bin/activate
+
+facetrack \
+  --device 0 \
+  --display \
+  --control \
+  --command-interval-s 0.2 \
+  --yaw-gain 0.25 \
+  --deadband 0.10 \
+  --yaw-min-deg -30 \
+  --yaw-max-deg 30 \
+  --selected-rad 0.523599
+```
+
+不写 `--cameras` 时会自动选择一个或两个 W19。`--device auto` 也会自动选择可用 GPU，但 `--device 0` 会明确指定第一块 NVIDIA GPU。可在另一个终端观察 GPU：
+
+```bash
+watch -n 1 nvidia-smi
+```
+
+建议先使用默认的 `--imgsz 640`。GPU 仍有余量并且需要识别更小的人脸时，可以增加 `--imgsz 960`，但显存占用和推理延迟也会增加。AMD 或 Intel GPU 需要安装相应的 ROCm 或 XPU 版本；当前模块只验证过 NVIDIA CUDA。
+
 ## 不连接电机的测试
 
 检查命令行：
