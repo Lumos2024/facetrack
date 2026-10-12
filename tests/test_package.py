@@ -13,10 +13,11 @@ class PackageTests(unittest.TestCase):
         digest = hashlib.sha256(DEFAULT_MODEL.read_bytes()).hexdigest()
         self.assertEqual(digest, EXPECTED_MODEL_SHA256)
 
-    def test_default_cli_uses_two_cameras_and_detection_only(self):
+    def test_default_cli_auto_discovers_w19_cameras_and_uses_detection_only(self):
         args = build_parser().parse_args([])
 
-        self.assertEqual(args.cameras, ["0", "1"])
+        self.assertIsNone(args.cameras)
+        self.assertEqual(args.camera_match, "W19")
         self.assertFalse(args.control)
         self.assertEqual(args.model, str(DEFAULT_MODEL))
         self.assertEqual(args.target_selected_topic, "/target_selected")

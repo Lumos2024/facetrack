@@ -17,17 +17,17 @@ sudo apt install -y python3.10-venv python3-pip libgl1 libglib2.0-0
 chmod +x scripts/install_ubuntu.sh
 ./scripts/install_ubuntu.sh
 source .venv/bin/activate
-facetrack --cameras 0 1 --display
+facetrack --display
 ```
 
-无桌面环境时不要传 `--display`。摄像头编号通常对应 `/dev/video0` 和 `/dev/video1`。
+默认通过 udev 自动选择名称包含 `W19` 的最多两个视频采集节点，不依赖 `/dev/videoN` 编号。无桌面环境时不要传 `--display`。
 
 有摄像头但没有电机时，可使用模拟电机测试 `/target_selected`：
 
 ```bash
 source /opt/ros/humble/setup.bash
 source .venv/bin/activate
-facetrack --cameras 0 --display --control --simulate-motor --selected-rad 0.0
+facetrack --display --control --simulate-motor --selected-rad 0.0
 ```
 
 此模式订阅真实 ROS Bool topic，但不会向真实 `/neck_positions_batch_1V2` 发布电机命令。
@@ -55,7 +55,7 @@ ros2 topic echo /neck_states_1V2 --once
 ```bash
 source /opt/ros/humble/setup.bash
 source .venv/bin/activate
-facetrack --cameras 0 1 --display --control \
+facetrack --display --control \
   --yaw-min-deg -10 --yaw-max-deg 10 --command-interval-s 1
 ```
 

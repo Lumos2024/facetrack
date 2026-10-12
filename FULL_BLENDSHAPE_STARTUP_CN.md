@@ -147,7 +147,6 @@ source /home/zmh/positioning_robots/.venv/bin/activate
 cd /home/zmh/positioning_robots/standalone/facetrack
 
 facetrack \
-  --cameras 2 5 \
   --device cpu \
   --display \
   --control \
@@ -158,6 +157,8 @@ facetrack \
   --yaw-max-deg 30 \
   --selected-rad 0.523599
 ```
+
+FaceTrack 会通过 udev 自动选择名称包含 `W19` 的最多两个采集节点，因此更换电脑后不需要修改 `/dev/videoN` 编号。只有调试非 W19 设备时才需要显式传入 `--cameras`。
 
 ## 运行时切换
 

@@ -6,7 +6,7 @@
 
 ## 功能
 
-- 支持一个或两个摄像头；一个摄像头不可用时自动使用另一个。
+- 默认按 USB/V4L 设备身份自动选择名称包含 `W19` 的一个或两个摄像头，不依赖会变化的 `/dev/videoN` 编号。
 - 每个摄像头只保留最新帧，避免推理积压造成越来越大的延迟。
 - 双摄像头批量推理：每个画面先选择面积最大的人脸，再选择水平偏差最大的摄像头。
 - 摄像头切换包含保持时间和连续确认，减少目标在两个画面之间反复跳动。
@@ -62,19 +62,24 @@ source .venv/bin/activate
 facetrack --help
 ```
 
-单摄像头检测：
+默认自动发现 W19 摄像头：
 
 ```bash
-facetrack --cameras 0 --device cpu --display
+facetrack --device cpu --display
 ```
 
-双摄像头检测：
+程序会扫描 `/dev/video*`，通过 `udevadm` 检查 `ID_V4L_PRODUCT`、`ID_MODEL` 和 `ID_SERIAL`，只选择包含 `W19` 且具有视频采集能力的节点。这会排除笔记本内置摄像头和相机的 metadata 节点。两台 W19 按 USB 物理路径稳定排序。
+
+检查系统识别到的产品名：
 
 ```bash
-facetrack --cameras 0 1 --device cpu --display
+for dev in /dev/video*; do
+  echo "$dev"
+  udevadm info --query=property --name="$dev" | grep -E 'ID_V4L_PRODUCT|ID_MODEL|ID_V4L_CAPABILITIES'
+done
 ```
 
-如果真实摄像头编号是 `2` 和 `5`：
+仅在调试时，可用 `--cameras` 显式覆盖自动发现：
 
 ```bash
 facetrack --cameras 2 5 --device cpu --display
@@ -90,7 +95,7 @@ facetrack --cameras 2 5 --device cpu --display
 source /opt/ros/humble/setup.bash
 source .venv/bin/activate
 
-facetrack --cameras 0 1 --device cpu --display \
+facetrack --device cpu --display \
   --control --simulate-motor
 ```
 
@@ -188,7 +193,7 @@ ros2 topic info /neck_positions_batch_1V2 -v
 source /opt/ros/humble/setup.bash
 source .venv/bin/activate
 
-facetrack --cameras 0 1 --device cpu --display --control \
+facetrack --device cpu --display --control \
   --command-interval-s 1.0 \
   --yaw-gain 0.25 \
   --deadband 0.10 \
@@ -200,7 +205,7 @@ facetrack --cameras 0 1 --device cpu --display --control \
 确认方向、限位和急停后，可以使用当前 `±30°` 配置：
 
 ```bash
-facetrack --cameras 2 5 --device cpu --display --control \
+facetrack --device cpu --display --control \
   --command-interval-s 0.2 \
   --yaw-gain 0.25 \
   --deadband 0.10 \

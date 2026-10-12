@@ -5,17 +5,73 @@ import importlib
 import logging
 import math
 import os
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from .ros_neck import RosNeckClient, SimulatedRosNeckClient
 
 
 LOGGER = logging.getLogger("dual_camera_face_tracker")
 DEFAULT_MODEL = Path(__file__).resolve().parent / "models" / "yolov8m-face.pt"
+
+
+def _read_udev_properties(device: Path) -> dict[str, str]:
+    """Return udev properties for one Linux video node."""
+
+    try:
+        result = subprocess.run(
+            ["udevadm", "info", "--query=property", f"--name={device}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return {}
+    if result.returncode != 0:
+        return {}
+    properties: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            properties[key] = value
+    return properties
+
+
+def discover_matching_cameras(
+    product_match: str = "W19",
+    *,
+    limit: int = 2,
+    device_paths: Sequence[Path] | None = None,
+    property_reader: Callable[[Path], dict[str, str]] | None = None,
+) -> list[str]:
+    """Find capture-capable Linux video nodes whose USB identity matches a product name."""
+
+    needle = str(product_match).strip().casefold()
+    if not needle:
+        raise ValueError("camera product match must not be empty")
+    paths = list(device_paths) if device_paths is not None else list(Path("/dev").glob("video*"))
+    read_properties = property_reader or _read_udev_properties
+    candidates: list[tuple[str, str, str]] = []
+    for path in paths:
+        properties = read_properties(path)
+        identity = " ".join(
+            properties.get(key, "")
+            for key in ("ID_V4L_PRODUCT", "ID_MODEL", "ID_SERIAL")
+        ).casefold()
+        if needle not in identity:
+            continue
+        capabilities = properties.get("ID_V4L_CAPABILITIES")
+        if capabilities is not None and ":capture:" not in capabilities.casefold():
+            continue
+        physical_path = properties.get("ID_PATH", properties.get("ID_PATH_TAG", str(path)))
+        candidates.append((physical_path, path.name, str(path)))
+    candidates.sort()
+    return [path for _, _, path in candidates[: max(1, int(limit))]]
 
 
 def _import_yolo_class() -> Any:
@@ -410,7 +466,17 @@ def _parse_camera_source(value: str) -> int | str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Track the largest YOLOv8 face using one or two neck cameras")
-    parser.add_argument("--cameras", nargs="+", default=["0", "1"], help="One or two camera indexes or video paths")
+    parser.add_argument(
+        "--cameras",
+        nargs="+",
+        default=None,
+        help="Explicit camera indexes or video paths; overrides automatic W19 discovery",
+    )
+    parser.add_argument(
+        "--camera-match",
+        default="W19",
+        help="USB/V4L product identity used for automatic camera discovery (default: W19)",
+    )
     parser.add_argument("--model", default=str(DEFAULT_MODEL), help="YOLOv8-face .pt model")
     parser.add_argument("--device", default="auto", help="Ultralytics device, for example auto, cpu, 0")
     parser.add_argument("--imgsz", type=int, default=640)
@@ -546,12 +612,23 @@ def _update_display_frame_cache(
 
 
 def run(args: argparse.Namespace) -> int:
-    if len(args.cameras) > 2:
+    camera_values = args.cameras
+    if camera_values is None:
+        camera_values = discover_matching_cameras(args.camera_match, limit=2)
+        if not camera_values:
+            LOGGER.error(
+                "No capture-capable camera matching %r was found; "
+                "check udevadm info or use --cameras for an explicit diagnostic override",
+                args.camera_match,
+            )
+            return 2
+        LOGGER.info("Auto-selected %s camera node(s): %s", args.camera_match, ", ".join(camera_values))
+    if len(camera_values) > 2:
         raise ValueError("This tracker supports at most two cameras")
     workers: list[CameraWorker] = []
     neck: RosNeckClient | None = None
     try:
-        for index, value in enumerate(args.cameras):
+        for index, value in enumerate(camera_values):
             source = _parse_camera_source(value)
             worker = CameraWorker(source, camera_id=str(index), width=args.width, height=args.height)
             if worker.start():

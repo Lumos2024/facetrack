@@ -13,5 +13,5 @@ python3.10 -m venv --system-site-packages .venv
 .venv/bin/python -m pytest
 
 echo "安装完成。运行：source .venv/bin/activate"
-echo "然后执行：facetrack --cameras 0 1 --display"
+echo "然后执行：facetrack --display  # 自动选择 W19 摄像头"
 

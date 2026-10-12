@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 import numpy as np
 
@@ -9,6 +10,7 @@ from neck_face_tracker.tracker import (
     MostBiasedCameraSelector,
     _compose_display,
     _update_display_frame_cache,
+    discover_matching_cameras,
     largest_face,
 )
 from neck_face_tracker.ros_neck import SimulatedRosNeckClient
@@ -55,6 +57,58 @@ class LargestFaceTests(unittest.TestCase):
         )
 
         self.assertIsNone(selected)
+
+
+class CameraDiscoveryTests(unittest.TestCase):
+    def test_only_capture_capable_w19_nodes_are_selected_in_usb_path_order(self):
+        devices = [
+            Path("/dev/video8"),
+            Path("/dev/video3"),
+            Path("/dev/video2"),
+            Path("/dev/video9"),
+        ]
+        properties = {
+            "/dev/video8": {
+                "ID_V4L_PRODUCT": "W19 HD Webcam",
+                "ID_V4L_CAPABILITIES": ":capture:",
+                "ID_PATH": "pci-usb-0:9:1.0",
+            },
+            "/dev/video9": {
+                "ID_V4L_PRODUCT": "W19 HD Webcam",
+                "ID_V4L_CAPABILITIES": ":",
+                "ID_PATH": "pci-usb-0:9:1.0",
+            },
+            "/dev/video2": {
+                "ID_MODEL": "W19_HD_Webcam",
+                "ID_V4L_CAPABILITIES": ":capture:",
+                "ID_PATH": "pci-usb-0:4:1.0",
+            },
+            "/dev/video3": {
+                "ID_V4L_PRODUCT": "Integrated Camera",
+                "ID_V4L_CAPABILITIES": ":capture:",
+                "ID_PATH": "pci-usb-0:8:1.0",
+            },
+        }
+
+        selected = discover_matching_cameras(
+            "w19",
+            device_paths=devices,
+            property_reader=lambda path: properties[str(path)],
+        )
+
+        self.assertEqual(selected, ["/dev/video2", "/dev/video8"])
+
+    def test_no_product_match_returns_no_camera(self):
+        selected = discover_matching_cameras(
+            "W19",
+            device_paths=[Path("/dev/video0")],
+            property_reader=lambda _path: {
+                "ID_V4L_PRODUCT": "Integrated Camera",
+                "ID_V4L_CAPABILITIES": ":capture:",
+            },
+        )
+
+        self.assertEqual(selected, [])
 
 
 class MostBiasedCameraSelectorTests(unittest.TestCase):
