@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-独立运行人脸跟踪，不依赖原机器人主工程。模块接收一个或两个同步随颈部转动的普通摄像头画面，选出需要跟随的目标，并可通过已有 ROS 2 Motor 1 协议驱动颈部偏航轴。
+独立运行人脸跟踪，不依赖原机器人主工程。模块接收一个或两个同步随颈部转动的普通摄像头画面，选出需要跟随的目标，并通过 ESP32 1V2 的 CAN3 驱动颈部偏航轴。
 
 ## 2. 功能需求
 
@@ -14,8 +14,8 @@
 6. 某一路不可用时自动使用剩余一路；两路都不可用时不启动。
 7. GUI 只使用 OpenCV，显示画面、框、水平误差、选中的摄像头和电机状态。
 8. 默认检测模式绝不发布电机命令。真实控制必须显式传入 `--control`。
-9. 真实控制只操作 Motor 1，并限制软件跟踪范围，默认 `-45°` 到 `+45°`。
-10. 持续订阅 `/target_selected` (`std_msgs/Bool`)。`true` 的上升沿取消跟踪轨迹，向 `/neck_positions_batch` 发送一次可配置的固定 rad；保持 `true` 时不再发送电机命令，变回 `false` 后恢复人脸跟踪。
+9. 真实控制只操作 CAN3 yaw，并限制软件跟踪范围，默认 `-30°` 到 `+30°`。
+10. 持续订阅 `/target_selected` (`std_msgs/Bool`)。`true` 的上升沿取消跟踪轨迹，向 `/neck_positions_batch_1V2` 发送一次可配置的 CAN3 固定 rad；保持 `true` 时不再发送电机命令，变回 `false` 后恢复人脸跟踪。
 11. 不发布 `/neck_control_owner`；`/target_selected` 是 facetrack 与其他颈部控制节点之间唯一的切换信号。
 
 ## 3. 软件环境
@@ -32,7 +32,7 @@
 - Ubuntu 22.04
 - ROS 2 Humble
 - `rclpy` 与 `std_msgs`，由 ROS 2 系统安装提供，不由 pip 安装
-- 已运行、并兼容本项目 12 个 float 协议的 CAN/电机桥接节点
+- 已运行、并兼容 ESP32 1V2 六字段 `[pos1,pos2,pos3,cmd1,cmd2,cmd3]` 协议的 CAN/电机桥接节点
 
 本项目不提供 Windows 安装与兼容支持。检测、GUI、模拟控制和真实 ROS 2 控制都在 Ubuntu 环境完成。
 
@@ -57,6 +57,6 @@
 2. `facetrack --help` 正常输出，`python -m pytest` 全部通过。
 3. 单摄像头检测、双摄像头检测和拔掉一路后的降级行为正常。
 4. 使用 `--simulate-motor` 确认跟踪方向与 GUI。
-5. 真实硬件首次测试先把跟踪范围改为 `--yaw-min-deg -10 --yaw-max-deg 10 --max-step-deg 2`。
-6. 确认急停、机械限位、Motor 1 反馈以及其他发布节点状态后，再扩大范围。
+5. 真实硬件首次测试先把跟踪范围改为 `--yaw-min-deg -10 --yaw-max-deg 10 --command-interval-s 1`。
+6. 确认急停、机械限位、CAN3 反馈以及其他发布节点状态后，再扩大范围。
 

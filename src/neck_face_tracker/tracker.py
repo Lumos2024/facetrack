@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import logging
+import math
 import os
 import threading
 import time
@@ -54,6 +55,11 @@ class FaceObservation:
         center_x, _ = self.center
         half_width = max(1.0, self.frame_width / 2.0)
         return max(-1.0, min(1.0, (center_x - half_width) / half_width))
+
+    @property
+    def pixel_dx(self) -> float:
+        center_x, _ = self.center
+        return center_x - self.frame_width / 2.0
 
 
 def largest_face(
@@ -349,32 +355,28 @@ class FaceYawController:
         horizontal_fov_deg: float = 70.0,
         gain: float = 0.65,
         yaw_sign: int = 1,
-        max_step_deg: float = 5.0,
-        yaw_min_deg: float = -45.0,
-        yaw_max_deg: float = 45.0,
-        min_command_interval_s: float = 0.20,
-        speed_deg_s: float = 25.0,
+        yaw_min_deg: float = -30.0,
+        yaw_max_deg: float = 30.0,
+        command_interval_s: float = 1.0,
     ):
         self.neck = neck
         self.deadband = max(0.0, min(0.5, float(deadband)))
         self.horizontal_fov_deg = max(10.0, min(180.0, float(horizontal_fov_deg)))
         self.gain = max(0.05, min(2.0, float(gain)))
         self.yaw_sign = -1 if int(yaw_sign) < 0 else 1
-        self.max_step_deg = max(0.1, min(30.0, float(max_step_deg)))
         self.yaw_min_deg = float(min(yaw_min_deg, yaw_max_deg))
         self.yaw_max_deg = float(max(yaw_min_deg, yaw_max_deg))
-        self.min_command_interval_s = max(0.05, float(min_command_interval_s))
-        self.speed_deg_s = max(1.0, float(speed_deg_s))
+        self.command_interval_s = max(0.1, float(command_interval_s))
         self._last_command_s = 0.0
 
     def update(self, target: FaceObservation, *, now_s: float | None = None) -> dict[str, float] | None:
         now = time.monotonic() if now_s is None else float(now_s)
         if abs(target.normalized_dx) <= self.deadband:
             return None
-        if now - self._last_command_s < self.min_command_interval_s:
+        if now - self._last_command_s < self.command_interval_s:
             return None
         status = self.neck.status()
-        if not status.connected or not status.enabled or status.position_deg is None or status.moving:
+        if not status.connected or not status.enabled or status.position_deg is None:
             return None
         raw_delta = (
             self.yaw_sign
@@ -382,13 +384,21 @@ class FaceYawController:
             * (self.horizontal_fov_deg / 2.0)
             * self.gain
         )
-        delta_deg = max(-self.max_step_deg, min(self.max_step_deg, raw_delta))
-        goal_deg = max(self.yaw_min_deg, min(self.yaw_max_deg, status.position_deg + delta_deg))
+        goal_deg = max(self.yaw_min_deg, min(self.yaw_max_deg, status.position_deg + raw_delta))
         effective_delta = goal_deg - status.position_deg
         if abs(effective_delta) < 0.05:
             return None
-        duration_s = max(0.28, abs(effective_delta) / self.speed_deg_s)
-        motion = self.neck.move_motor1(goal_deg, duration_s)
+        # Send one absolute CAN3 target. The ESP32 keeps the last target; no
+        # intermediate 100 Hz trajectory samples are needed from FaceTrack.
+        motion = self.neck.send_yaw_position_once(math.radians(goal_deg))
+        motion.update(
+            start_deg=round(status.position_deg, 3),
+            delta_deg=round(effective_delta, 3),
+            pixel_dx=round(target.pixel_dx, 3),
+            normalized_dx=round(target.normalized_dx, 6),
+            raw_delta_rad=round(math.radians(raw_delta), 6),
+            command_delta_rad=round(math.radians(effective_delta), 6),
+        )
         self._last_command_s = now
         return motion
 
@@ -409,12 +419,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--deadband", type=float, default=0.10, help="Normalized horizontal deadband")
     parser.add_argument("--horizontal-fov", type=float, default=70.0)
+    parser.add_argument("--yaw-gain", type=float, default=0.65, help="Pixel-angle correction gain")
     parser.add_argument("--yaw-sign", type=int, choices=(-1, 1), default=1)
-    parser.add_argument("--max-step-deg", type=float, default=5.0)
-    parser.add_argument("--yaw-min-deg", type=float, default=-45.0)
-    parser.add_argument("--yaw-max-deg", type=float, default=45.0)
-    parser.add_argument("--control", action="store_true", help="Actually command ROS Motor 1")
-    parser.add_argument("--simulate-motor", action="store_true", help="Use the in-process simulated Motor 1")
+    parser.add_argument("--command-interval-s", type=float, default=1.0, help="Seconds between direct CAN3 targets")
+    parser.add_argument("--yaw-min-deg", type=float, default=-30.0)
+    parser.add_argument("--yaw-max-deg", type=float, default=30.0)
+    parser.add_argument("--control", action="store_true", help="Actually command ESP32 CAN3 yaw")
+    parser.add_argument("--simulate-motor", action="store_true", help="Use the in-process simulated CAN3 yaw")
     parser.add_argument(
         "--target-selected-topic",
         default="/target_selected",
@@ -423,8 +434,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--selected-rad",
         type=float,
-        default=0.0,
-        help="Motor 1 position sent once when target_selected becomes true",
+        default=math.radians(30.0),
+        help="CAN3 yaw position sent once when target_selected becomes true (default: +30 deg)",
     )
     parser.add_argument("--display", action="store_true", help="Show camera windows; requires non-headless OpenCV")
     parser.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
@@ -568,7 +579,7 @@ def run(args: argparse.Namespace) -> int:
                     target_selected_topic=args.target_selected_topic,
                     listen_to_ros=True,
                 )
-                neck.enable_motor1()
+                neck.enable_yaw()
                 if not neck.target_selected_listener_available():
                     LOGGER.warning(
                         "ROS 2 target listener unavailable; source ROS 2 before testing %s",
@@ -580,14 +591,15 @@ def run(args: argparse.Namespace) -> int:
                 neck,
                 deadband=args.deadband,
                 horizontal_fov_deg=args.horizontal_fov,
+                gain=args.yaw_gain,
                 yaw_sign=args.yaw_sign,
-                max_step_deg=args.max_step_deg,
                 yaw_min_deg=args.yaw_min_deg,
                 yaw_max_deg=args.yaw_max_deg,
+                command_interval_s=args.command_interval_s,
             )
             LOGGER.info("Motor control enabled%s", " (simulated)" if args.simulate_motor else "")
         else:
-            LOGGER.info("Detection-only mode; pass --control to command Motor 1")
+            LOGGER.info("Detection-only mode; pass --control to command CAN3 yaw")
 
         previous_sequences: dict[str, int] = {}
         display_frame_cache: dict[str, CameraFrame] = {}
@@ -595,15 +607,21 @@ def run(args: argparse.Namespace) -> int:
         selected_camera: str | None = None
         last_live_frame_s = time.monotonic()
         camera_loss_motion_cancelled = False
-        target_selected_was_active = False
+        target_selected_was_active: bool | None = None
+        target_selected_wait_logged = False
         selected_rad_sent = False
         while True:
             frames = [frame for worker in workers if (frame := worker.snapshot()) is not None]
             now_s = time.monotonic()
-            target_selected_active = bool(neck is not None and neck.target_selected())
-            if target_selected_active != target_selected_was_active:
+            target_selected_value = neck.target_selected() if neck is not None else False
+            target_selected_known = neck is None or target_selected_value is not None
+            target_selected_active = target_selected_value is True
+            if neck is not None and not target_selected_known and not target_selected_wait_logged:
+                LOGGER.info("Waiting for first %s Bool message; CAN3 output is blocked", args.target_selected_topic)
+                target_selected_wait_logged = True
+            if target_selected_known and target_selected_active != target_selected_was_active:
                 if target_selected_active:
-                    neck.cancel_motor1_motion()
+                    neck.cancel_yaw_motion()
                     LOGGER.info(
                         "%s=true: face-angle control paused; waiting to send %.6f rad once",
                         args.target_selected_topic,
@@ -614,23 +632,23 @@ def run(args: argparse.Namespace) -> int:
                     LOGGER.info("%s=false: face tracking resumed", args.target_selected_topic)
                 target_selected_was_active = target_selected_active
 
-            if neck is not None and not args.simulate_motor and not motor_enable_requested:
+            if neck is not None and target_selected_known and not args.simulate_motor and not motor_enable_requested:
                 motor_status = neck.status()
                 if motor_status.connected:
                     if motor_status.enabled:
-                        LOGGER.info("Motor 1 is already enabled")
+                        LOGGER.info("CAN3 yaw is already enabled")
                     else:
-                        neck.enable_motor1()
-                        LOGGER.info("Motor 1 enable command sent after valid feedback")
+                        neck.enable_yaw()
+                        LOGGER.info("CAN3 yaw enable command sent after valid feedback")
                     motor_enable_requested = True
 
             if target_selected_active and neck is not None and not selected_rad_sent:
                 motor_status = neck.status()
                 if motor_status.connected and motor_status.enabled:
-                    command = neck.send_motor1_position_once(args.selected_rad)
+                    command = neck.send_yaw_position_once(args.selected_rad)
                     selected_rad_sent = True
                     LOGGER.info(
-                        "%s=true: sent Motor 1 target %.6f rad (%.3f deg) once; motor topic now silent",
+                        "%s=true: sent CAN3 yaw target %.6f rad (%.3f deg) once; motor topic now silent",
                         args.target_selected_topic,
                         command["goal_rad"],
                         command["goal_deg"],
@@ -638,11 +656,12 @@ def run(args: argparse.Namespace) -> int:
             if not frames:
                 if (
                     neck is not None
+                    and target_selected_known
                     and not target_selected_active
                     and not camera_loss_motion_cancelled
                     and now_s - last_live_frame_s >= 1.0
                 ):
-                    neck.cancel_motor1_motion()
+                    neck.cancel_yaw_motion()
                     camera_loss_motion_cancelled = True
                     LOGGER.warning("All camera streams are stale; face-tracking motion cancelled")
                 time.sleep(0.02)
@@ -667,14 +686,18 @@ def run(args: argparse.Namespace) -> int:
                         selected.normalized_dx,
                         selected.normalized_area,
                     )
-                if controller is not None and not target_selected_active:
+                if controller is not None and target_selected_known and not target_selected_active:
                     motion = controller.update(selected)
                     if motion is not None:
                         LOGGER.info(
-                            "Motor goal %.2f deg from camera %s (dx=%+.3f)",
+                            "CAN3 yaw goal %.2f deg from camera %s "
+                            "(pixel_dx=%+.1f, dx=%+.3f, raw=%+.4f rad, command=%+.4f rad)",
                             motion["goal_deg"],
                             selected.camera_id,
+                            motion["pixel_dx"],
                             selected.normalized_dx,
+                            motion["raw_delta_rad"],
+                            motion["command_delta_rad"],
                         )
 
             if args.display:
@@ -693,7 +716,11 @@ def run(args: argparse.Namespace) -> int:
                     selected_text = (
                         "target_selected=true"
                         if target_selected_active
-                        else (f"selected={selected.camera_id}" if selected is not None else "selected=none")
+                        else (
+                            "target_selected=waiting"
+                            if not target_selected_known
+                            else (f"selected={selected.camera_id}" if selected is not None else "selected=none")
+                        )
                     )
                     display_frames = _update_display_frame_cache(
                         display_frame_cache,

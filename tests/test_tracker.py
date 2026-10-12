@@ -98,23 +98,52 @@ class MostBiasedCameraSelectorTests(unittest.TestCase):
 class FaceYawControllerTests(unittest.TestCase):
     def test_deadband_does_not_move_motor(self):
         neck = SimulatedRosNeckClient()
-        neck.enable_motor1()
+        neck.enable_yaw()
         controller = FaceYawController(neck, deadband=0.1)
 
         self.assertIsNone(controller.update(observation("left", 0.05), now_s=1.0))
         self.assertEqual(neck.status().position_deg, 0.0)
-        neck.disable_motor1()
+        neck.disable_yaw()
 
-    def test_bias_is_converted_to_limited_yaw_move(self):
+    def test_bias_is_sent_as_one_direct_yaw_target(self):
         neck = SimulatedRosNeckClient()
-        neck.enable_motor1()
-        controller = FaceYawController(neck, deadband=0.1, max_step_deg=5.0)
+        neck.enable_yaw()
+        published = []
+        original_publish = neck._publish
+
+        def record_publish(values):
+            published.append(list(values))
+            original_publish(values)
+
+        neck._publish = record_publish
+        controller = FaceYawController(neck, deadband=0.1)
 
         motion = controller.update(observation("left", 0.8), now_s=1.0)
 
         self.assertIsNotNone(motion)
-        self.assertEqual(motion["goal_deg"], 5.0)
-        neck.disable_motor1()
+        self.assertEqual(motion["goal_deg"], 18.2)
+        self.assertEqual(motion["pixel_dx"], 256.0)
+        self.assertAlmostEqual(motion["command_delta_rad"], 0.31765, places=5)
+        self.assertEqual(len(published), 1)
+        self.assertEqual(len(published[0]), 6)
+        self.assertAlmostEqual(published[0][2], np.deg2rad(18.2), places=6)
+        self.assertEqual(published[0][3:6], [0.0] * 3)
+        self.assertFalse(neck.status().moving)
+        neck.disable_yaw()
+
+    def test_direct_yaw_target_is_rate_limited_to_once_per_second(self):
+        neck = SimulatedRosNeckClient()
+        neck.enable_yaw()
+        controller = FaceYawController(neck, deadband=0.1, command_interval_s=1.0)
+
+        first = controller.update(observation("left", 0.8), now_s=1.0)
+        too_early = controller.update(observation("left", 0.8), now_s=1.5)
+        second = controller.update(observation("left", 0.8), now_s=2.0)
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(too_early)
+        self.assertIsNotNone(second)
+        neck.disable_yaw()
 
 class SimpleGuiTests(unittest.TestCase):
     def test_two_camera_frames_are_composed_in_one_window_image(self):

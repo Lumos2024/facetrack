@@ -20,7 +20,11 @@ class PackageTests(unittest.TestCase):
         self.assertFalse(args.control)
         self.assertEqual(args.model, str(DEFAULT_MODEL))
         self.assertEqual(args.target_selected_topic, "/target_selected")
-        self.assertEqual(args.selected_rad, 0.0)
+        self.assertAlmostEqual(args.selected_rad, 0.5235987755982988)
+        self.assertEqual(args.yaw_min_deg, -30.0)
+        self.assertEqual(args.yaw_max_deg, 30.0)
+        self.assertEqual(args.yaw_gain, 0.65)
+        self.assertEqual(args.command_interval_s, 1.0)
 
 
 if __name__ == "__main__":
