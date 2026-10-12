@@ -299,3 +299,9 @@ docs/                               安装、需求和 ROS 接口文档
 - 软件限幅不能替代驱动器限位、机械限位和现场急停。
 
 第三方模型和组件信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+## FaceTrack + Aura2 完整启动流程
+
+需要同时启动 micro-ROS Agent、blendshape 转换节点、Aura2 互联网节点和 FaceTrack 时，请按六个终端的完整顺序操作：
+
+- [FaceTrack + Aura2 互联网 Blendshape 完整启动顺序](FULL_BLENDSHAPE_STARTUP_CN.md)
